@@ -1,9 +1,10 @@
+
 pipeline {
     agent any
 
     parameters {
         string(name: 'IMAGE_TAG', defaultValue: 'latest', description: 'Docker image tag')
-        booleanParam(name: 'PUSH_IMAGE', defaultValue: false, description: 'Push image to Docker Hub')
+        booleanParam(name: 'PUSH_IMAGE', defaultValue: false, description: 'Push image and deploy to Kubernetes')
     }
 
     environment {
@@ -24,7 +25,18 @@ pipeline {
                     steps {
                         bat '''
                         if not exist index.html exit /b 1
-                        powershell -NoProfile -Command "$h = Get-Content index.html -Raw; if ($h -notmatch 'Academic Block' -or $h -notmatch 'Library' -or $h -notmatch 'Research Centre' -or $h -notmatch 'totalUsage' -or $h -notmatch 'highestUsage') { exit 1 }"
+                        findstr /C:"Campus Energy Summary" index.html
+                        if errorlevel 1 exit /b 1
+                        findstr /C:"Academic Block" index.html
+                        if errorlevel 1 exit /b 1
+                        findstr /C:"Library" index.html
+                        if errorlevel 1 exit /b 1
+                        findstr /C:"Research Centre" index.html
+                        if errorlevel 1 exit /b 1
+                        findstr /C:"totalUsage" index.html
+                        if errorlevel 1 exit /b 1
+                        findstr /C:"highestUsage" index.html
+                        if errorlevel 1 exit /b 1
                         '''
                     }
                 }
@@ -35,7 +47,9 @@ pipeline {
                         if not exist Dockerfile exit /b 1
                         if not exist deployment.yaml exit /b 1
                         findstr /C:"FROM nginx:alpine" Dockerfile
+                        if errorlevel 1 exit /b 1
                         findstr /C:"kind: Deployment" deployment.yaml
+                        if errorlevel 1 exit /b 1
                         '''
                     }
                 }
@@ -54,7 +68,6 @@ pipeline {
             }
         }
 
-        
         stage('Test Application Container') {
             steps {
                 script {
@@ -79,7 +92,6 @@ pipeline {
             }
         }
 
-
         stage('Push to Docker Hub') {
             when {
                 expression { return params.PUSH_IMAGE }
@@ -90,7 +102,53 @@ pipeline {
                     powershell -NoProfile -Command "$env:DOCKER_PASS | docker login -u $env:DOCKER_USER --password-stdin"
                     if errorlevel 1 exit /b 1
                     docker push %IMAGE_NAME%:%IMAGE_TAG%
+                    if errorlevel 1 exit /b 1
                     '''
+                }
+            }
+        }
+
+        stage('Deploy to Kubernetes') {
+            when {
+                expression { return params.PUSH_IMAGE }
+            }
+            steps {
+                withCredentials([file(credentialsId: 'kubeconfig-credentials', variable: 'KUBECONFIG_FILE')]) {
+                    script {
+                        bat '''
+                        kubectl --kubeconfig="%KUBECONFIG_FILE%" apply -f deployment.yaml
+                        if errorlevel 1 exit /b 1
+                        '''
+                        bat '''
+                        kubectl --kubeconfig="%KUBECONFIG_FILE%" set image deployment/campus-energy energy-dashboard=%IMAGE_NAME%:%IMAGE_TAG%
+                        if errorlevel 1 exit /b 1
+                        '''
+                        script {
+                            def rolloutResult = bat(
+                                returnStatus: true,
+                                script: 'kubectl --kubeconfig="%KUBECONFIG_FILE%" rollout status deployment/campus-energy --timeout=120s'
+                            )
+
+                            if (rolloutResult != 0) {
+                                echo 'Deployment failed. Attempting automatic rollback.'
+
+                                bat '''
+                                kubectl --kubeconfig="%KUBECONFIG_FILE%" rollout undo deployment/campus-energy
+                                if errorlevel 1 exit /b 1
+                                kubectl --kubeconfig="%KUBECONFIG_FILE%" rollout status deployment/campus-energy --timeout=120s
+                                if errorlevel 1 exit /b 1
+                                '''
+
+                                error('Deployment failed; previous version was restored.')
+                            }
+                        }
+
+                        bat '''
+                        kubectl --kubeconfig="%KUBECONFIG_FILE%" get deployments
+                        kubectl --kubeconfig="%KUBECONFIG_FILE%" get pods
+                        kubectl --kubeconfig="%KUBECONFIG_FILE%" get services
+                        '''
+                    }
                 }
             }
         }
@@ -98,7 +156,7 @@ pipeline {
 
     post {
         success {
-            echo 'SUCCESS: Latest code was tested, built and archived.'
+            echo 'SUCCESS: Dashboard tested, Docker image built, and requested deployment completed.'
         }
         failure {
             echo 'FAILED: Check Console Output for the failed stage.'
