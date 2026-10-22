@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Smart Campus Energy Monitoring</title>
+<style>
+body{font-family:Arial,sans-serif;background:#f1f5f9;color:#172033;margin:0;padding:24px}
+header{background:#123b50;color:white;padding:24px;border-radius:12px}
+.buildings{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:18px;margin-top:22px}
+.card{background:white;padding:22px;border-radius:12px;box-shadow:0 2px 8px #0001}
+.value{font-size:30px;font-weight:bold;color:#087e8b}
+.warning{color:#b91c1c;background:#fee2e2;padding:10px;border-radius:6px}
+.target{color:#166534}
+footer{margin-top:25px;color:#475569}
+</style>
+</head>
+<body>
+<header>
+<h1>Smart Campus Energy Monitoring System</h1>
+<p>Daily electricity consumption and energy-saving targets</p>
+</header>
+<main>
+<section id="buildings" class="buildings"></section>
+<footer id="summary">Daily monitoring uses sample data.</footer>
+</main>
+<script>
+const buildings=[
+{name:"Academic Block",usage:125,target:100},
+{name:"Library",usage:85,target:90},
+{name:"Research Centre",usage:110,target:100}
+];
+document.getElementById("buildings").innerHTML=buildings.map(b=>`
+<article class="card">
+<h2>${b.name}</h2>
+<p>Daily consumption</p>
+<div class="value">${b.usage} kWh</div>
+<p class="target">Energy-saving target: ${b.target} kWh</p>
+${b.usage>100?`<p class="warning">Warning: Consumption exceeds 100 kWh by ${b.usage-100} kWh.</p>`:"<p>Consumption is within the 100 kWh limit.</p>"}
+</article>`).join("");
+</script>
+</body>
+</html>
