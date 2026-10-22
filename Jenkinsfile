@@ -113,7 +113,7 @@ pipeline {
                 expression { return params.PUSH_IMAGE }
             }
             steps {
-                withCredentials([file(credentialsId: 'kubeconfig-credentials', variable: 'KUBECONFIG_FILE')]) {
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG_FILE')]) {
                     script {
                         bat '''
                         kubectl --kubeconfig="%KUBECONFIG_FILE%" apply -f deployment.yaml
