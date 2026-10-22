@@ -54,15 +54,23 @@ pipeline {
             }
         }
 
+        
         stage('Test Application Container') {
             steps {
                 script {
                     try {
                         bat 'docker rm -f campus-energy-test 2>NUL & exit /b 0'
                         bat 'docker run -d --name campus-energy-test -p 18081:80 %IMAGE_NAME%:%IMAGE_TAG%'
-
+                        bat 'powershell -NoProfile -Command "Start-Sleep -Seconds 3"'
                         bat '''
-                        powershell -NoProfile -Command "$ok = $false; for ($i = 0; $i -lt 15; $i++) { try { $r = Invoke-WebRequest -Uri 'http://localhost:18081/' -TimeoutSec 3; if ($r.StatusCode -eq 200 -and $r.Content -match 'Academic Block' -and $r.Content -match 'Research Centre' -and $r.Content -match 'Campus Energy Summary') { $ok = $true; break } } catch { Start-Sleep -Seconds 2 } }; if (-not $ok) { Write-Error 'Dashboard test failed'; exit 1 }"
+                        curl.exe -fsS http://localhost:18081/ -o dashboard-response.html
+                        if errorlevel 1 exit /b 1
+                        findstr /C:"Campus Energy Summary" dashboard-response.html
+                        if errorlevel 1 exit /b 1
+                        findstr /C:"Academic Block" dashboard-response.html
+                        if errorlevel 1 exit /b 1
+                        findstr /C:"Research Centre" dashboard-response.html
+                        if errorlevel 1 exit /b 1
                         '''
                     } finally {
                         bat 'docker rm -f campus-energy-test 2>NUL & exit /b 0'
@@ -70,6 +78,7 @@ pipeline {
                 }
             }
         }
+
 
         stage('Push to Docker Hub') {
             when {
