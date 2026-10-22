@@ -2,19 +2,16 @@ pipeline {
     agent any
 
     parameters {
-        string(name: 'IMAGE_TAG', defaultValue: 'latest', description: 'Docker image tag to build and deploy')
-        choice(name: 'SIMULATE_FAULTY_RELEASE', choices: ['NO', 'YES'], description: 'YES deploys a deliberately invalid image to test automatic rollback')
+        string(name: 'IMAGE_TAG', defaultValue: 'latest', description: 'Docker image tag')
+        booleanParam(name: 'PUSH_IMAGE', defaultValue: false, description: 'Push image to Docker Hub')
     }
 
     environment {
         IMAGE_NAME = 'catherine7/smart-campus-energy'
-        DEPLOYMENT_NAME = 'campus-energy'
-        CONTAINER_NAME = 'energy-dashboard'
-        SERVICE_NAME = 'campus-energy-service'
     }
 
     stages {
-        stage('Checkout') {
+        stage('Checkout Latest Code') {
             steps {
                 checkout scm
                 bat 'git log -1 --oneline'
@@ -27,19 +24,18 @@ pipeline {
                     steps {
                         bat '''
                         if not exist index.html exit /b 1
-                        powershell -NoProfile -Command "$html = Get-Content index.html -Raw; if ($html -notmatch 'Academic Block' -or $html -notmatch 'Library' -or $html -notmatch 'Research Centre' -or $html -notmatch '100') { exit 1 }"
+                        powershell -NoProfile -Command "$h = Get-Content index.html -Raw; if ($h -notmatch 'Academic Block' -or $h -notmatch 'Library' -or $h -notmatch 'Research Centre' -or $h -notmatch 'totalUsage' -or $h -notmatch 'highestUsage') { exit 1 }"
                         '''
                     }
                 }
 
-                stage('Validate Deployment Files') {
+                stage('Validate Docker and Kubernetes Files') {
                     steps {
                         bat '''
                         if not exist Dockerfile exit /b 1
                         if not exist deployment.yaml exit /b 1
-                        if not exist Jenkinsfile exit /b 1
+                        findstr /C:"FROM nginx:alpine" Dockerfile
                         findstr /C:"kind: Deployment" deployment.yaml
-                        findstr /C:"campus-energy" deployment.yaml
                         '''
                     }
                 }
@@ -58,87 +54,48 @@ pipeline {
             }
         }
 
-        stage('Test Docker Image') {
+        stage('Test Application Container') {
             steps {
-                bat '''
-                docker rm -f campus-energy-test 2>NUL
-                docker run -d --name campus-energy-test -p 18081:80 %IMAGE_NAME%:%IMAGE_TAG%
-                powershell -NoProfile -Command "$ok = $false; for ($i = 0; $i -lt 12; $i++) { try { $r = Invoke-WebRequest -Uri 'http://localhost:18081/' -TimeoutSec 3; if ($r.StatusCode -eq 200 -and $r.Content -match 'Academic Block' -and $r.Content -match 'Research Centre') { $ok = $true; break } } catch { Start-Sleep -Seconds 2 } }; if (-not $ok) { exit 1 }"
-                if errorlevel 1 (
-                    docker logs campus-energy-test
-                    docker rm -f campus-energy-test
-                    exit /b 1
-                )
-                docker rm -f campus-energy-test
-                '''
-            }
-        }
+                script {
+                    try {
+                        bat 'docker rm -f campus-energy-test 2>NUL & exit /b 0'
+                        bat 'docker run -d --name campus-energy-test -p 18081:80 %IMAGE_NAME%:%IMAGE_TAG%'
 
-        stage('Push Docker Image') {
-            steps {
-                withCredentials([usernamePassword(credentialsId: 'dockerhub-credentials', usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
-                    bat '''
-                    docker login -u "%DOCKER_USER%" --password-stdin <<< "%DOCKER_PASS%"
-                    '''
-                    bat 'docker push %IMAGE_NAME%:%IMAGE_TAG%'
+                        bat '''
+                        powershell -NoProfile -Command "$ok = $false; for ($i = 0; $i -lt 15; $i++) { try { $r = Invoke-WebRequest -Uri 'http://localhost:18081/' -TimeoutSec 3; if ($r.StatusCode -eq 200 -and $r.Content -match 'Academic Block' -and $r.Content -match 'Research Centre' -and $r.Content -match 'Campus Energy Summary') { $ok = $true; break } } catch { Start-Sleep -Seconds 2 } }; if (-not $ok) { Write-Error 'Dashboard test failed'; exit 1 }"
+                        '''
+                    } finally {
+                        bat 'docker rm -f campus-energy-test 2>NUL & exit /b 0'
+                    }
                 }
             }
         }
 
-        stage('Deploy and Verify') {
+        stage('Push to Docker Hub') {
+            when {
+                expression { return params.PUSH_IMAGE }
+            }
             steps {
-                script {
-                    withCredentials([file(credentialsId: 'kubeconfig-credentials', variable: 'KUBECONFIG')]) {
-                        bat 'kubectl apply -f deployment.yaml'
-
-                        try {
-                            if (params.SIMULATE_FAULTY_RELEASE == 'YES') {
-                                bat 'kubectl set image deployment/%DEPLOYMENT_NAME% %CONTAINER_NAME%=%IMAGE_NAME%:deliberately-invalid-image'
-                            } else {
-                                bat 'kubectl set image deployment/%DEPLOYMENT_NAME% %CONTAINER_NAME%=%IMAGE_NAME%:%IMAGE_TAG%'
-                            }
-
-                            bat 'kubectl rollout status deployment/%DEPLOYMENT_NAME% --timeout=90s'
-
-                            bat '''
-                            kubectl get deployment %DEPLOYMENT_NAME%
-                            kubectl get pods -l app=campus-energy
-                            kubectl run campus-energy-check --image=curlimages/curl:latest --restart=Never --rm -i --quiet -- curl -fsS --max-time 10 http://campus-energy-service
-                            '''
-                        } catch (err) {
-                            echo 'Deployment or verification failed. Starting automatic rollback.'
-
-                            bat 'kubectl rollout undo deployment/%DEPLOYMENT_NAME%'
-                            bat 'kubectl rollout status deployment/%DEPLOYMENT_NAME% --timeout=120s'
-
-                            bat '''
-                            kubectl get deployment %DEPLOYMENT_NAME%
-                            kubectl get pods -l app=campus-energy
-                            kubectl run campus-energy-recovery-check --image=curlimages/curl:latest --restart=Never --rm -i --quiet -- curl -fsS --max-time 10 http://campus-energy-service
-                            '''
-
-                            currentBuild.result = 'UNSTABLE'
-                            echo 'Rollback completed and the previous release passed the recovery check.'
-                        }
-                    }
+                withCredentials([usernamePassword(credentialsId: 'dockerhub-credentials', usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
+                    bat '''
+                    powershell -NoProfile -Command "$env:DOCKER_PASS | docker login -u $env:DOCKER_USER --password-stdin"
+                    if errorlevel 1 exit /b 1
+                    docker push %IMAGE_NAME%:%IMAGE_TAG%
+                    '''
                 }
             }
         }
     }
 
     post {
-        always {
-            bat 'docker rm -f campus-energy-test 2>NUL & exit /b 0'
-            echo 'Smart Campus Energy pipeline execution finished.'
-        }
         success {
-            echo 'Build, image publishing, deployment and verification completed successfully.'
-        }
-        unstable {
-            echo 'A deployment failure occurred. Check the automatic rollback and recovery verification logs.'
+            echo 'SUCCESS: Latest code was tested, built and archived.'
         }
         failure {
-            echo 'Pipeline failed. Review the failed stage in the Jenkins console output.'
+            echo 'FAILED: Check Console Output for the failed stage.'
+        }
+        always {
+            echo 'Smart Campus Energy pipeline finished.'
         }
     }
 }
